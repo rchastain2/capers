@@ -21,4 +21,5 @@ debian/capers/
 debian/capers.debhelper.log
 debian/capers.substvars
 debian/files
+lib/
 share/capers.pyc
