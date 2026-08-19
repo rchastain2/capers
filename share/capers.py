@@ -23,6 +23,29 @@ COPYING for details on distribution and derivation.
 
 (c) Peter Chiochetti, 2004, 2005
 
+PORT NOTE (Python 3 / PyGObject):
+
+this is a port of the original PyGTK2 + libglade + GnomeCanvas
+program to Python 3 and PyGObject, targeting GTK 3 (not GTK 4,
+which dropped GtkAction/GtkBuilder-driven signal autoconnect and
+would have required a much larger rewrite of the menu/action
+system).
+
+GnomeCanvas has no GTK 3 equivalent, so the CheckerBoard widget
+was rewritten from scratch on top of Gtk.DrawingArea + Cairo,
+keeping piece objects as small Python helper objects (see class
+Piece below) instead of canvas items. the public API of
+CheckerBoard (new, flip, setposition, take_piece, set_piece,
+move_piece, ...) was kept as close as possible to the original,
+so the Game class needed almost no changes.
+
+libglade's typedict-based custom widget mechanism does not exist
+for Gtk.Builder: custom widget classes are now resolved by
+GObject type name directly from the .ui file (each custom class
+below sets __gtype_name__ to match the class="..." attribute
+used in share/capers.ui), so those classes must be imported
+before the Gtk.Builder that loads the .ui file is created - which
+is already the case, since they are defined in this same module.
 
 DISCLAIMER:
 
@@ -75,11 +98,21 @@ TODO:
 
 import os
 import sys
-import thread
-import gobject
-import gtk
-import gnome.canvas
+import threading
 import math
+from functools import reduce
+
+import gi
+gi.require_version('Gtk', '3.0')
+gi.require_version('PangoCairo', '1.0')
+from gi.repository import GObject, GLib, Gtk, Gdk, GdkPixbuf, Pango, PangoCairo
+
+# compatibility aliases: keep the rest of this file close to the
+# original PyGTK source, which used lowercase module names
+gobject = GObject
+gtk = Gtk
+gdk = Gdk
+pango = Pango
 
 
 # =======
@@ -118,9 +151,9 @@ class Position:
 		"""return mutable deepcopy of position:
 		simple types by value, objects by reference"""
 		temp = []
-		for i in xrange(len(position)):
+		for i in range(len(position)):
 			temp.append([0]*len(position[i]))
-			for j in xrange(len(position[i])):
+			for j in range(len(position[i])):
 				temp[i][j] = position[i][j]
 		return temp
 
@@ -142,9 +175,9 @@ class Position:
 		"change position to match fen setup, return turn, position"
 		turn, bpos, wpos = fen
 		fpos = {}
-		for num, val in bpos.iteritems():
+		for num, val in bpos.items():
 			fpos[num] = val
-		for num, val in wpos.iteritems():
+		for num, val in wpos.items():
 			fpos[num] = val
 		for s in position:
 			if not s[self.COL_NUM]:
@@ -163,19 +196,19 @@ class Position:
 		pos = []
 		cells = 10
 		count = 0
-		for col in xrange(cells):
-			for row in xrange(cells):
+		for col in range(cells):
+			for row in range(cells):
 				if (row + col) % 2 == 1:
 					if count < 39:
-						pos.append((count / 2 + 1,
+						pos.append((count // 2 + 1,
 							self.WHITE|self.MAN,
 							row, col, 0))
 					elif count > 59:
-						pos.append((count / 2 + 1,
+						pos.append((count // 2 + 1,
 							self.BLACK|self.MAN,
 							row, col, 0))
 					else:
-						pos.append((count / 2 + 1,
+						pos.append((count // 2 + 1,
 							self.EMPTY,
 							row, col, 0))
 				else:
@@ -189,21 +222,21 @@ class Position:
 		pos = []
 		cells = 8
 		count = 0
-		for col in xrange(cells):
-			for row in xrange(cells):
+		for col in range(cells):
+			for row in range(cells):
 				if (row + col) % 2 == 1:
 					if count < 24:
-						pos.append((count / 2 + 1,
+						pos.append((count // 2 + 1,
 							self.BLACK|self.MAN,
 							cells - row - 1,
 							cells - col - 1, 0))
 					elif count > 39:
-						pos.append((count / 2 + 1,
+						pos.append((count // 2 + 1,
 							self.WHITE|self.MAN,
 							cells - row - 1,
 							cells - col - 1, 0))
 					else:
-						pos.append((count / 2 + 1,
+						pos.append((count // 2 + 1,
 							self.EMPTY,
 							cells - row - 1,
 							cells - col - 1, 0))
@@ -228,21 +261,21 @@ class Position:
 		pos = []
 		cells = 8
 		count = 0
-		for col in xrange(cells):
-			for row in xrange(cells):
+		for col in range(cells):
+			for row in range(cells):
 				if (row + col) % 2 == 0:
 					if count < 24:
-						pos.append((count / 2 + 1,
+						pos.append((count // 2 + 1,
 							self.BLACK|self.MAN,
 							cells - row - 1,
 							col, 0))
 					elif count > 40:
-						pos.append((count / 2 + 1,
+						pos.append((count // 2 + 1,
 							self.WHITE|self.MAN,
 							cells - row - 1,
 							col, 0))
 					else:
-						pos.append((count / 2 + 1,
+						pos.append((count // 2 + 1,
 							self.EMPTY,
 							cells - row - 1,
 							col, 0))
@@ -252,6 +285,7 @@ class Position:
 						col, 0))
 				count += 1
 		return (self.WHITE, self.copy(pos))
+
 
 class Game:
 	"""glue together gui, engine, board and book
@@ -293,7 +327,7 @@ class Game:
 	engines_loop = 0
 
 	def __init__(self):
-		self.lock = thread.allocate_lock()
+		self.lock = threading.Lock()
 
 	# setup
 	def new(self):
@@ -561,7 +595,7 @@ class Game:
 	def engines_stop(self):
 		"make engine_getmove always return False"
 		if self.engines_loop:
-			gobject.source_remove(self.engines_loop)
+			GLib.source_remove(self.engines_loop)
 			self.engines_loop = 0
 			Main.feedback.g_push('Engines stop')
 
@@ -570,7 +604,7 @@ class Game:
 		if self.engines_loop:
 			return
 		self.engines_loop = \
-			gobject.timeout_add(self._timeout, self.engine_getmove)
+			GLib.timeout_add(self._timeout, self.engine_getmove)
 		Main.feedback.g_push('Engines go')
 
 	def engine_getmove(self):
@@ -620,9 +654,9 @@ class Game:
 			Main.book.trunc_game(self._move_curr)
 		# name = move as string
 		if jumps:
-			name = 'x'.join([`num` for num in steps])
+			name = 'x'.join([str(num) for num in steps])
 		else:
-			name = '-'.join([`num` for num in steps])
+			name = '-'.join([str(num) for num in steps])
 		self._game_curr, self._move_curr = Main.book.new_move(name,
 			self._position, self._color, steps)
 		self._move_last = self._move_curr
@@ -630,9 +664,9 @@ class Game:
 	def save_oldmove(self, steps, jumps):
 		"reregister move with book, increments move_curr"
 		if jumps:
-			name = 'x'.join([`num` for num in steps])
+			name = 'x'.join([str(num) for num in steps])
 		else:
-			name = '-'.join([`num` for num in steps])
+			name = '-'.join([str(num) for num in steps])
 		self._game_curr, self._move_curr = Main.book.old_move(
 			self._move_curr, name, self._position, self._color, steps)
 		self._move_last = self._move_curr
@@ -665,7 +699,7 @@ class Game:
 			if code == Engine.LOSS:
 				Main.book.set_result('1-0')
 		# wait after engines status pushed
-		gobject.timeout_add(self._timeout, Main.feedback.g_push, message)
+		GLib.timeout_add(self._timeout, Main.feedback.g_push, message)
 
 	# board management
 	def empty(self):
@@ -747,16 +781,17 @@ class Game:
 		code, steps, new, old, huffs, lock = data
 		if code != Engine.UNKNOWN:
 			if len(huffs):
-				move = 'x'.join([`num` for num in steps])
+				move = 'x'.join([str(num) for num in steps])
 			else:
-				move = '-'.join([`num` for num in steps])
+				move = '-'.join([str(num) for num in steps])
 			self.set_result(code, move)
 			lock.release()
 			# dont use this move
 			return False
 		self._position = Main.pos.copy(self._position)
 		reduce(self.do_move, steps)
-		map(self.take_piece, huffs)
+		for num in huffs:
+			self.take_piece(num)
 		if new != old:
 			self.promote(steps[-1], new)
 		self._color ^= Position.CC
@@ -774,7 +809,8 @@ class Game:
 		code, steps, new, old, huffs = data
 		self._position = Main.pos.copy(self._position)
 		reduce(self.do_move_silent, steps)
-		map(self.take_piece, huffs)
+		for num in huffs:
+			self.take_piece(num)
 		if new != old:
 			self.promote(steps[-1], new)
 		self._color ^= Position.CC
@@ -793,7 +829,8 @@ class Game:
 		code, steps, new, old, huffs = data
 		self._position = Main.pos.copy(self._position)
 		reduce(self.do_move_silent, steps)
-		map(self.take_piece_silent, huffs)
+		for num in huffs:
+			self.take_piece_silent(num)
 		# make kings
 		if new != old:
 			self.promote(steps[-1], new, True)
@@ -807,7 +844,7 @@ class Game:
 
 import datetime
 
-class Book(gtk.TreeStore):
+class Book(Gtk.TreeStore):
 	"""game history - a tree of all the games in the book
 
 	- games grow from the root
@@ -824,6 +861,8 @@ class Book(gtk.TreeStore):
 	the "event" header is in COL_NAME
 	"""
 
+	__gtype_name__ = 'Book'
+
 	# general
 	COL_NAME = 0 # pdn event or move as string
 	COL_HEAD = 1 # game headers
@@ -833,14 +872,14 @@ class Book(gtk.TreeStore):
 	COL_ANNO = 4
 	COL_POS = 5
 	COL_TURN = 6 # who's next
-	
+
 	def __init__(self):
-		super(Book, self).__init__(
-			str, gobject.TYPE_PYOBJECT,
-			gobject.TYPE_PYOBJECT, str, str, gobject.TYPE_PYOBJECT, int,
-			int, str, str, str, gobject.TYPE_PYOBJECT,
-			gobject.TYPE_PYOBJECT)
-		assert self.get_flags() & gtk.TREE_MODEL_ITERS_PERSIST
+		Gtk.TreeStore.__init__(self,
+			str, GObject.TYPE_PYOBJECT,
+			GObject.TYPE_PYOBJECT, str, str, GObject.TYPE_PYOBJECT, int,
+			int, str, str, str, GObject.TYPE_PYOBJECT,
+			GObject.TYPE_PYOBJECT)
+		assert self.get_flags() & Gtk.TreeModelFlags.ITERS_PERSIST
 
 	def do_clear(self):
 		"clear book"
@@ -961,7 +1000,7 @@ class Book(gtk.TreeStore):
 		else:
 			fstr = 'W:B'
 		black = []
-		for num, val in bpos.iteritems():
+		for num, val in bpos.items():
 			if val & Position.KING:
 				black.append('K%d' % num)
 			else:
@@ -969,7 +1008,7 @@ class Book(gtk.TreeStore):
 		fstr = fstr + ','.join(black)
 		fstr = fstr + ':W'
 		white = []
-		for num, val in wpos.iteritems():
+		for num, val in wpos.items():
 			if val & Position.KING:
 				white.append('K%d' % num)
 			else:
@@ -1028,7 +1067,7 @@ class Book(gtk.TreeStore):
 		count = 2
 		while move:
 			if count % 2 == 0:
-				movelist.append(str(count / 2) + '.')
+				movelist.append(str(count // 2) + '.')
 			count += 1
 			name = self.get_value(move, self.COL_NAME)
 			stren = self.get_value(move, self.COL_STREN)
@@ -1059,8 +1098,6 @@ class Pdn(shlex.shlex):
 
 	def __init__(self, stream, filename):
 		"init lexer in posix mode, prepare parser"
-		# not a new style class
-		#super(Pdn, self).__init__()
 		shlex.shlex.__init__(self, stream, filename, True)
 		self.wordchars = self.wordchars + """.-/'<>*!?"""
 		self.quotes = '"'
@@ -1078,7 +1115,7 @@ class Pdn(shlex.shlex):
 				return [int(square), color|Position.MAN]
 			if square[0].lower() == 'k':
 				return [int(square[1:]), color|Position.KING]
-			print self.error_leader(), 'invalid square in fen: "%s"' %square
+			print(self.error_leader(), 'invalid square in fen: "%s"' % square)
 			return (0, 0)
 		turn, pos1, pos2 = fen.split(':')
 		if turn.lower() == 'b':
@@ -1095,7 +1132,7 @@ class Pdn(shlex.shlex):
 			black = dict([num_val(x, Position.BLACK) for x in black])
 			white = dict([num_val(x, Position.WHITE) for x in white])
 		except ValueError:
-			print self.error_leader(), 'invalid fen: "%s"' %fen
+			print(self.error_leader(), 'invalid fen: "%s"' % fen)
 			return [0, 0, 0]
 		return turn, black, white
 
@@ -1110,13 +1147,13 @@ class Pdn(shlex.shlex):
 			Main.book.pdn_game()
 			Main.feedback.g_push('Loading game: %3i' % self.game)
 			# parsing may take some time
-			while gtk.events_pending():
-				gtk.main_iteration(False)
+			while Gtk.events_pending():
+				Gtk.main_iteration(False)
 		key = self.get_token()
 		value = self.get_token()
 		header = Main.book[self.game][Book.COL_HEAD]
 		if self.pdn_trace:
-			print """H:%s,:	[%s "%s"]""" % (self.game, key, value)
+			print("""H:%s,:	[%s "%s"]""" % (self.game, key, value))
 		if key.lower() == 'event':
 			Main.book[self.game][Book.COL_NAME] = value
 		elif key.lower() == 'gametype':
@@ -1129,7 +1166,7 @@ class Pdn(shlex.shlex):
 		for token in iter(self.get_token, None):
 			if token == ']':
 				return
-			print self.error_leader(), 'stray text in header: "%s"' %token
+			print(self.error_leader(), 'stray text in header: "%s"' % token)
 
 	def parse_annotation(self):
 		"parse annotation, return it"
@@ -1139,7 +1176,7 @@ class Pdn(shlex.shlex):
 		for token in iter(self.get_token, None):
 			if token == '}':
 				if self.pdn_trace:
-					print "A:%s,%s:	{%s}" % (self.game, self.move, annotation)
+					print("A:%s,%s:	{%s}" % (self.game, self.move, annotation))
 				return annotation
 			annotation = ' '.join((annotation, token))
 
@@ -1150,14 +1187,14 @@ class Pdn(shlex.shlex):
 			try:
 				return [int(x) for x in steps] 
 			except ValueError:
-				print self.error_leader(), 'stray text in movelist: "%s"' %move
+				print(self.error_leader(), 'stray text in movelist: "%s"' % move)
 				return [0, 0]
 		elif move.count('x'):
 			steps = move.split('x')
 			try:
 				return [int(x) for x in steps] 
 			except ValueError:
-				print self.error_leader(), 'stray text in movelist: "%s"' %move
+				print(self.error_leader(), 'stray text in movelist: "%s"' % move)
 				return [0, 0]
 		else:
 			return [False]
@@ -1191,7 +1228,7 @@ class Pdn(shlex.shlex):
 			self.push_token(token)
 			break
 		if self.pdn_trace:
-			print "M:%s,%s:	%s" %(self.game, self.move, steps)
+			print("M:%s,%s:	%s" % (self.game, self.move, steps))
 		return (move, steps, strength, annotation)
 
 	def parse_moves(self):
@@ -1233,7 +1270,7 @@ class Pdn(shlex.shlex):
 				self.push_token(token)
 				break
 			# warn about others
-			print self.error_leader(), 'stray text in movelist: "%s"' %token
+			print(self.error_leader(), 'stray text in movelist: "%s"' % token)
 			break
 
 	def parse(self):
@@ -1260,11 +1297,11 @@ class Pdn(shlex.shlex):
 				self.parse_moves()
 				continue
 			# warn about others
-			print self.error_leader(), 'stray text: "%s"' %token
+			print(self.error_leader(), 'stray text: "%s"' % token)
 		Main.bookview.connect_model(True)
 		Main.game.lock.release()
 		Main.feedback.g_push('read %d games from %s'
-			%(self.game + 1, self.name))
+			% (self.game + 1, self.name))
 		if self.game < 0:
 			Main.game.new()
 			Main.feedback.g_push('No games found')
@@ -1272,12 +1309,11 @@ class Pdn(shlex.shlex):
 		Main.game.pdn(self.game)
 		return True
 
-import pango
 
-class CellRendererWrap(gtk.GenericCellRenderer):
+class CellRendererWrap(Gtk.CellRenderer):
 	"""a cell renderer, that wraps long text
 
-	the first on_get_size will not be given a cell_area, probably,
+	the first do_get_size will not be given a cell_area, probably,
 	because the treeview widget is not yet realized. as no width can
 	be set for the wordwrap, pango will not wrap at all and the cell
 	will be as wide as the longest single line in the model.
@@ -1294,17 +1330,24 @@ class CellRendererWrap(gtk.GenericCellRenderer):
 	cell_area.
 
 	this always sets the marked up text
+
+	PORT NOTE: on GTK 3 a custom cell renderer overrides do_get_size and
+	do_render (formerly on_get_size/on_render on PyGTK's
+	GenericCellRenderer), and paints with a cairo.Context instead of a
+	gtk.gdk.Window; Gtk.render_layout() replaces style.paint_layout().
 	"""
+
+	__gtype_name__ = 'CellRendererWrap'
+
 	__gproperties__ = {
-		'text': (gobject.TYPE_STRING, 'markup', 'markup displayed by the cell',
-					 '', gobject.PARAM_READWRITE),
-		'markup': (gobject.TYPE_STRING, 'markup', 'markup displayed by the cell',
-					 '', gobject.PARAM_READWRITE),
+		'text': (GObject.TYPE_STRING, 'markup', 'markup displayed by the cell',
+					 '', GObject.PARAM_READWRITE),
+		'markup': (GObject.TYPE_STRING, 'markup', 'markup displayed by the cell',
+					 '', GObject.PARAM_READWRITE),
 	}
 
 	def __init__(self):
-		gobject.GObject.__init__(self)
-		#self.set_property('mode', gtk.CELL_RENDERER_MODE_EDITABLE)
+		Gtk.CellRenderer.__init__(self)
 		self.set_property('xalign', 0.0)
 		self.set_property('yalign', 0.5)
 		self.set_property('xpad', 2)
@@ -1322,12 +1365,12 @@ class CellRendererWrap(gtk.GenericCellRenderer):
 			self.markup = value
 		else:
 			raise TypeError('No property named %s' % (property.name,))
-		
+
 	def _render(self, widget, cell_area, xpad):
 		"call pango to render the text"
 		layout = widget.create_pango_layout(self.text)
 		layout.set_markup(self.markup)
-		layout.set_wrap(pango.WRAP_WORD)
+		layout.set_wrap(Pango.WrapMode.WORD)
 
 		if cell_area:
 			width = cell_area.width
@@ -1335,7 +1378,7 @@ class CellRendererWrap(gtk.GenericCellRenderer):
 			width = self.get_property('width')
 		width -= 2 * xpad
 
-		layout.set_width(width * pango.SCALE)
+		layout.set_width(max(width, 0) * Pango.SCALE)
 		return layout
 
 	def _get_size(self, widget, cell_area, layout=False):
@@ -1355,35 +1398,40 @@ class CellRendererWrap(gtk.GenericCellRenderer):
 			x_offset = xalign * (cell_area.width - calc_width)
 			x_offset = max(x_offset, 0)
 			y_offset = yalign * (cell_area.height - calc_height)
-			y_offset = max(y_offset, 0)		   
+			y_offset = max(y_offset, 0)
 		else:
 			x_offset = 0
 			y_offset = 0
 		return int(x_offset), int(y_offset), calc_width, calc_height
 
-	def on_get_size(self, widget, cell_area):
+	def do_get_size(self, widget, cell_area):
 		"tell the treeview the cell's size"
 		return self._get_size(widget, cell_area)
 
-	def on_render(self, window, widget, background_area,
-		cell_area, expose_area, flags):
+	def do_get_preferred_width(self, widget):
+		x_offset, y_offset, width, height = self._get_size(widget, None)
+		return width, width
+
+	def do_get_preferred_height(self, widget):
+		x_offset, y_offset, width, height = self._get_size(widget, None)
+		return height, height
+
+	def do_render(self, cr, widget, background_area, cell_area, flags):
 		"paint the cell"
 		xpad = self.get_property('xpad')
 		ypad = self.get_property('ypad')
 
 		layout = self._render(widget, cell_area, xpad)
 		x_offset, y_offset, width, height = self._get_size(widget, cell_area, layout)
-		width -= 2*xpad
-		height -= 2*ypad
-		widget.style.paint_layout(window,
-			gtk.STATE_NORMAL, True,
-			cell_area, widget, "text",
+
+		style_context = widget.get_style_context()
+		Gtk.render_layout(style_context, cr,
 			cell_area.x + x_offset + xpad,
 			cell_area.y + y_offset + ypad,
 			layout)
-gobject.type_register(CellRendererWrap) # make widget available to bookview
 
-class BookView(gtk.TreeView):
+
+class BookView(Gtk.TreeView):
 	"""display of book: games and moves
 
 	the book view displays data from several columns of the book model
@@ -1395,12 +1443,12 @@ class BookView(gtk.TreeView):
 	annotations
 	"""
 
+	__gtype_name__ = 'BookView'
+
 	_book = None # for disconnect/reconnect
 
 	def __init__(self):
-		"never called, libglade doesnt"
-		gobject.GObject.__init__(self)
-		#assert 0 # obviously, now its called
+		Gtk.TreeView.__init__(self)
 
 	def edit_game(self, model, path):
 		"edit game headers and dialog"
@@ -1424,11 +1472,11 @@ class BookView(gtk.TreeView):
 		egn.set_text(header['round'])
 		egr.set_text(header['result'])
 		ega.set_text(annotation)
-		if editor.run() == gtk.RESPONSE_OK:
+		if editor.run() == Gtk.ResponseType.OK:
 			model.set(game,
 				Book.COL_NAME, ege.get_text(),
 				Book.COL_ANNO, ega.get_text(ega.get_start_iter(),
-					ega.get_end_iter()))
+					ega.get_end_iter(), True))
 			header['date'] = egd.get_text()
 			header['black'] = egb.get_text()
 			header['white'] = egw.get_text()
@@ -1457,14 +1505,14 @@ class BookView(gtk.TreeView):
 		elif stren == '?': emsw.set_active(1)
 		else: emsn.set_active(1)
 		ema.set_text(annotation)
-		if editor.run() == gtk.RESPONSE_OK:
-			if emso.state: stren = '!'
-			elif emsa.state: stren = '*'
-			elif emsw.state: stren = '?'
+		if editor.run() == Gtk.ResponseType.OK:
+			if emso.get_active(): stren = '!'
+			elif emsa.get_active(): stren = '*'
+			elif emsw.get_active(): stren = '?'
 			else: stren = ''
 			model.set(move, Book.COL_STREN, stren)
 			model.set(move, Book.COL_ANNO,
-				ema.get_text(ema.get_start_iter(), ema.get_end_iter()))
+				ema.get_text(ema.get_start_iter(), ema.get_end_iter(), True))
 			Main.feedback.g_push('Move info set')
 		else:
 			Main.feedback.g_push('Edit move cancelled')
@@ -1480,7 +1528,7 @@ class BookView(gtk.TreeView):
 			Main.feedback.g_push('Edit move info')
 			self.edit_move(treeview.get_model(), path)
 		return True
-		
+
 	def on_change_selection(self, selection):
 		"on selction change goto selected game or move"
 		if Main.game.lock.locked(): return False
@@ -1489,15 +1537,15 @@ class BookView(gtk.TreeView):
 		if not iter: return False
 		Main.game.goto_game_move(model.get_path(iter))
 		return True
-		
+
 	def open(self, book):
 		"connect to the model, install callbacks"
 		self._book = book
 		self.set_model(book)
-		column = gtk.TreeViewColumn('Book')
+		column = Gtk.TreeViewColumn('Book')
 		column.set_fixed_width(210)
 		self.append_column(column)
-		
+
 		cell = CellRendererWrap()
 		column.pack_start(cell, False)
 		w = column.get_fixed_width()
@@ -1507,7 +1555,7 @@ class BookView(gtk.TreeView):
 		selection = self.get_selection()
 		selection.connect('changed', self.on_change_selection)
 
-	def do_markup (self, column, cell, model, iter):
+	def do_markup (self, column, cell, model, iter, data):
 		"add annotation and headers to cells markup"
 		name = model.get_value(iter, model.COL_NAME)
 		name = name.replace('&', '&amp;')
@@ -1540,7 +1588,6 @@ class BookView(gtk.TreeView):
 			self.set_model(None)
 		else:
 			self.set_model(self._book)
-gobject.type_register(BookView) # make widget available to libglade
 
 
 # ===========
@@ -1565,7 +1612,7 @@ class CBmove(Structure):
 		("mdel", CBcoor * 12),
 		("delpiece", c_int * 12)]
 
-class Engine (gobject.GObject):
+class Engine (GObject.GObject):
 	"""interface to the checkers engine dll
 
 	on init this class loads an engine. it also translates between
@@ -1575,7 +1622,7 @@ class Engine (gobject.GObject):
 	instant, the "getmove()" function needs to be in a thread: when
 	its done, it will install game.do_enginemove as an idle task
 	in gtk.
-	
+
 	getmove will change the game.lock, so feedback can know, when
 	the engine stopped. gtk seems to cycle thread locks, so not
 	deleting it, should not leak.
@@ -1587,7 +1634,15 @@ class Engine (gobject.GObject):
 	engines have to conform to the CheckerBoard API by Martin Fierz.
 	engines are written eg. in C, and can be loaded and removed at
 	runtime
+
+	PORT NOTE: the CBapi expects/returns C strings (char *); under
+	Python 3, ctypes c_char_p needs bytes, not str, so command and
+	reply strings are explicitly encoded/decoded here (utf-8, with
+	errors ignored on the way back since engines are free-form C
+	programs that may not be strict utf-8).
 	"""
+
+	__gtype_name__ = 'Engine'
 
 	# game result codes
 	DRAW = 0
@@ -1597,7 +1652,7 @@ class Engine (gobject.GObject):
 
 	def __init__(self, enginefile):
 		"load a dll, set globals: name, gametype, about, help"
-		gobject.GObject.__init__(self)
+		GObject.GObject.__init__(self)
 		try:
 			self.engine = cdll.LoadLibrary(enginefile)
 		except OSError:
@@ -1655,8 +1710,8 @@ class Engine (gobject.GObject):
 		if 0: # print board
 			squares = "-    wb  WB      "
 			for x in range(cells):
-				print ' '.join([squares[num] for num in board[x]])
-			print
+				print(' '.join([squares[num] for num in board[x]]))
+			print()
 
 	# int enginecommand(char str[256], char reply[256]);
 	def enginecommand(self, command):
@@ -1664,9 +1719,8 @@ class Engine (gobject.GObject):
 		res = 0
 		buf = c_buffer(256) # create_string_buffer
 
-		argtypes = [c_char_p, c_char_p]
-		res = self.engine.enginecommand(command, buf)
-		return res, buf.value
+		res = self.engine.enginecommand(command.encode('utf-8'), buf)
+		return res, buf.value.decode('utf-8', 'replace')
 
 	# int islegal(int b[8][8], int color, int from, int to,
 	#             struct CBmove *move);
@@ -1684,7 +1738,6 @@ class Engine (gobject.GObject):
 		self.pos2cbboard(position, board)
 
 		# call engine
-		argtypes = [(c_int * cells) * cells, c_int, c_int, c_int, CBmove]
 		res = self.engine.islegal(board, color, mfrom, mto, byref(cbmove))
 
 		steps = [self.cbcoor2num(cbmove.mfrom)]
@@ -1709,7 +1762,7 @@ class Engine (gobject.GObject):
 			return False
 		if lock != Main.game.lock:
 			return False
-		Main.feedback.e_push(buf.value)
+		Main.feedback.e_push(buf.value.decode('utf-8', 'replace'))
 		return lock.locked()
 
 	def playnow(self, lock, playnow):
@@ -1726,10 +1779,12 @@ class Engine (gobject.GObject):
 	def getmove(self, data):
 		"wraps the threaded call to the engine, always return False"
 		assert not Main.game.lock.locked()
-		Main.game.lock = thread.allocate_lock()
+		Main.game.lock = threading.Lock()
 		Main.game.lock.acquire()
-		assert thread.start_new_thread(
-			self.getmove_thread, ((Main.game.lock, data)))
+		thread = threading.Thread(target=self.getmove_thread,
+			args=(Main.game.lock, data))
+		thread.daemon = True
+		thread.start()
 
 	def getmove_thread(self, lock, data):
 		"start searching a move; in a thread"
@@ -1748,11 +1803,9 @@ class Engine (gobject.GObject):
 		cbmove = CBmove()
 
 		# let main thread handle feedback, break
-		gobject.timeout_add(200, self.showbuf, lock, buf)
-		gobject.timeout_add(100, self.playnow, lock, playnow)
+		GLib.timeout_add(200, self.showbuf, lock, buf)
+		GLib.timeout_add(100, self.playnow, lock, playnow)
 
-		argtypes = [(c_int * cells) * cells, c_double, c_char_p,
-			c_int, c_int, c_int, CBmove]
 		res = self.engine.getmove(board, color, maxtime, buf,
 			byref(playnow), info, moreinfo, byref(cbmove))
 
@@ -1772,15 +1825,80 @@ class Engine (gobject.GObject):
 			huffs.append(self.cbcoor2num(cbmove.mdel[i]))
 
 		# let main thread handle the move
-		gobject.idle_add(Main.game.do_enginemove,
+		GLib.idle_add(Main.game.do_enginemove,
 			(res, steps, cbmove.newpiece, cbmove.oldpiece, huffs, lock))
-gobject.type_register(Engine) # make widget available to Player ListStore
+
 
 # =========
 # B O A R D
 # =========
 
-class CheckerBoard(gnome.canvas.Canvas):
+class Piece:
+	"""a single checker piece drawn on the board
+
+	PORT NOTE: this replaces a gnome.canvas.CanvasPixbuf item. it
+	keeps its own top-left position in board pixel coordinates
+	(already flipped, if the board is flipped - exactly like the
+	canvas item's x/y used to be) and a visibility flag, and asks
+	the board to redraw itself whenever it changes. the small API
+	below (set/move/hide/show/destroy/raise_to_top) mirrors the
+	handful of canvas item methods the rest of this file used to
+	call, so CheckerBoard is the only class that had to change
+	significantly.
+	"""
+
+	def __init__(self, board, pixbuf, x, y):
+		self.board = board
+		self.pixbuf = pixbuf
+		self.x = x
+		self.y = y
+		self.visible = True
+
+	def set(self, pixbuf=None, x=None, y=None):
+		if pixbuf is not None:
+			self.pixbuf = pixbuf
+		if x is not None:
+			self.x = x
+		if y is not None:
+			self.y = y
+		self.board.queue_draw()
+
+	def move(self, dx, dy):
+		"relative move, like the canvas item's move()"
+		self.x += dx
+		self.y += dy
+		self.board.queue_draw()
+
+	def hide(self):
+		self.visible = False
+		self.board.queue_draw()
+
+	def show(self):
+		self.visible = True
+		self.board.queue_draw()
+
+	def destroy(self):
+		if self in self.board.pieces:
+			self.board.pieces.remove(self)
+		self.board.queue_draw()
+
+	def raise_to_top(self):
+		"move to the end of the draw order, like the canvas item's"
+		if self in self.board.pieces:
+			self.board.pieces.remove(self)
+			self.board.pieces.append(self)
+		self.board.queue_draw()
+
+	# canvas items used to be connected individually ('event'
+	# signal); the board now hit-tests self.board.pieces itself
+	# and dispatches straight to CheckerBoard.on_piece_event, so
+	# this is a no-op kept only so callers of piece.connect(...)
+	# do not need special-casing
+	def connect(self, *args, **kwargs):
+		pass
+
+
+class CheckerBoard(Gtk.DrawingArea):
 	"""present the game visually
 
 	- the user may drag pieces (event handler)
@@ -1799,9 +1917,23 @@ class CheckerBoard(gnome.canvas.Canvas):
 	passed when a new board is setup
 
 	the board resizes itself to match the setup, and flips, if asked
-	
+
 	self.busy is true, while a piece is moved by user or engine
+
+	PORT NOTE: this used to subclass gnome.canvas.Canvas, keeping a
+	background CanvasPixbuf, a CanvasGroup of CanvasText square
+	numbers and a CanvasGroup of CanvasPixbuf pieces. GnomeCanvas
+	has no GTK 3 equivalent, so this is now a plain Gtk.DrawingArea
+	painted with cairo: self.pieces is a plain list of Piece
+	(drawn in list order, so the last one is on top - the direct
+	equivalent of "raise_to_top"), self.numbers a plain list of
+	{'x','y','num'} dicts, and self._bg_pixbuf the pre-composited
+	background. dragging is implemented with the usual
+	button-press/motion-notify/button-release trio instead of
+	per-item 'event' signals.
 	"""
+
+	__gtype_name__ = 'CheckerBoard'
 
 	# private globals
 	_grid_width = 0
@@ -1810,12 +1942,25 @@ class CheckerBoard(gnome.canvas.Canvas):
 	_gametype = 0
 	_flipped = False # True when upsidedown
 	_x1 = _y1 = 0 # drag start point
+	_x = _y = 0
 	busy = False # True while move_piece
 	edit = False # True while editing
 
-	def __init_(self):
-		"never called, should libglade do that?"
-		assert 0
+	def __init__(self):
+		Gtk.DrawingArea.__init__(self)
+		self.pieces = []
+		self.numbers = []
+		self.pixbufs = []
+		self._bg_pixbuf = None
+		self._drag_piece = None
+		self.add_events(
+			Gdk.EventMask.BUTTON_PRESS_MASK |
+			Gdk.EventMask.BUTTON_RELEASE_MASK |
+			Gdk.EventMask.POINTER_MOTION_MASK)
+		self.connect('draw', self.on_draw)
+		self.connect('button-press-event', self.on_button_press)
+		self.connect('button-release-event', self.on_button_release)
+		self.connect('motion-notify-event', self.on_motion_notify)
 
 	def new(self, gametype, setup, flip):
 		"create board backdrop, pieces, numbers from setup"
@@ -1824,7 +1969,7 @@ class CheckerBoard(gnome.canvas.Canvas):
 
 		# grid_width is derived from loaded pixmap
 		scenefile = Main.prefs.get('look', 'scene')
-		pb = gtk.gdk.pixbuf_new_from_file(scenefile)
+		pb = GdkPixbuf.Pixbuf.new_from_file(scenefile)
 		gw = pb.get_height()
 		self._grid_width = gw
 
@@ -1835,30 +1980,20 @@ class CheckerBoard(gnome.canvas.Canvas):
 		elif (len(setup) == 100):
 			bw = gw * 10
 		self._board_width = bw
-		if self.get_size() != (bw, bw):
+		if (self.get_size_request() != (bw, bw)
+			or self._bg_pixbuf is None):
 			self.set_size_request(bw, bw)
-			self.set_scroll_region(0, 0, bw, bw)
 
-		# delete previous canvas items
-		if dir(self).count('background'):
-			self.background.destroy()
-			del self.background
-		if dir(self).count('numbers'):
-			self.numbers.destroy()
-			del self.numbers
-		if dir(self).count('pieces'):
-			self.pieces.destroy()
-			del self.pieces
+		# delete previous pieces, numbers
+		self.pieces = []
+		self.numbers = []
 
 		# all new, scene pixmap might have changed
-		self.background = self.root().add(gnome.canvas.CanvasPixbuf)
-		self.numbers = self.root().add(gnome.canvas.CanvasGroup)
-		self.pieces = self.root().add(gnome.canvas.CanvasGroup)
-		bg = gtk.gdk.Pixbuf(gtk.gdk.COLORSPACE_RGB, True, 8, bw, bw)
-		bm = pb.subpixbuf(gw*2, 0, gw, gw)
-		wm = pb.subpixbuf(gw*3, 0, gw, gw)
-		bk = pb.subpixbuf(gw*4, 0, gw, gw)
-		wk = pb.subpixbuf(gw*5, 0, gw, gw)
+		bg = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, bw, bw)
+		bm = pb.new_subpixbuf(gw*2, 0, gw, gw)
+		wm = pb.new_subpixbuf(gw*3, 0, gw, gw)
+		bk = pb.new_subpixbuf(gw*4, 0, gw, gw)
+		wk = pb.new_subpixbuf(gw*5, 0, gw, gw)
 		# map squares e=0, f=16
 		# map pieces  w=5, b=6, W=9, B=10
 		#          0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16
@@ -1873,22 +2008,21 @@ class CheckerBoard(gnome.canvas.Canvas):
 			# background
 			pb.copy_area(squares[v] * gw,
 				0, gw, gw, bg, x * gw, y * gw)
-			# numbers
+			# numbers (anchored bottom-right of the cell, like the
+			# original CanvasText with anchor=ANCHOR_SOUTH_EAST)
 			if squares[v]:
-				m = self.numbers.add(gnome.canvas.CanvasText,
-					anchor=gtk.ANCHOR_SOUTH_EAST)
-				m.set(text=n, x=x * gw + gw, y=y * gw + gw)
+				self.numbers.append(
+					{'num': n, 'x': x * gw + gw, 'y': y * gw + gw})
 			# pieces
 			if figures[v]:
-				p = self.pieces.add(gnome.canvas.CanvasPixbuf)
-				p.set(pixbuf=pixbufs[v], x=x * gw, y=y * gw)
-				p.connect('event', self.on_piece_event)
+				p = Piece(self, pixbufs[v], x * gw, y * gw)
+				self.pieces.append(p)
 				setup[i][Position.COL_PIECE] = p
 			i += 1
-		self.connect('event', self.on_board_event)
-		self.background.set(pixbuf=bg)
-		del pb, bg, squares, figures, m, p
+		self._bg_pixbuf = bg
+		del pb, bg, squares, figures
 		self.flip(flip)
+		self.queue_draw()
 
 	def flip(self, flip='flip'):
 		"quickly rotate board"
@@ -1902,14 +2036,11 @@ class CheckerBoard(gnome.canvas.Canvas):
 		gw = self._grid_width
 		bw = self._board_width
 
-		for n in self.numbers.item_list:
-			a, b, x, y = n.get_bounds()
-			x, y = n.i2w(x, y)
-			n.set(x=bw-x+gw, y=bw-y+gw)
-		for p in self.pieces.item_list:
-			a, b, x, y = p.get_bounds()
-			x, y = p.i2w(x, y)
-			p.set(x=bw-x, y=bw-y)
+		for n in self.numbers:
+			n['x'], n['y'] = bw - n['x'] + gw, bw - n['y'] + gw
+		for p in self.pieces:
+			p.x, p.y = bw - p.x - gw, bw - p.y - gw
+		self.queue_draw()
 
 	def setposition(self, setup):
 		"quickly switch to setup position, only same game"
@@ -1921,28 +2052,94 @@ class CheckerBoard(gnome.canvas.Canvas):
 				s[Position.COL_X], s[Position.COL_Y], s[Position.COL_PIECE]
 			if figures[v]:
 				if self._flipped:
-					x, y = p.w2i(bw - x * gw - gw, bw - y * gw - gw)
+					x, y = bw - x * gw - gw, bw - y * gw - gw
 				else:
-					x, y = p.w2i(x * gw, y * gw)
+					x, y = x * gw, y * gw
 				p.set(pixbuf=self.pixbufs[v], x=x, y=y)
 				p.show()
 			elif p:
 				p.hide()
-		#self.update_now()
+		self.queue_draw()
 
-	def on_board_event(self, num, event):
+	# --- drawing ---
+
+	def on_draw(self, widget, cr):
+		"paint background, numbers, pieces"
+		if self._bg_pixbuf is None:
+			return False
+		Gdk.cairo_set_source_pixbuf(cr, self._bg_pixbuf, 0, 0)
+		cr.paint()
+
+		gw = self._grid_width
+		cr.set_source_rgb(0, 0, 0)
+		cr.select_font_face('sans-serif',
+			0, 0) # cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL
+		cr.set_font_size(max(gw * 0.22, 7))
+		for n in self.numbers:
+			text = str(n['num'])
+			extents = cr.text_extents(text)
+			# anchor south-east: n['x'], n['y'] is the bottom-right
+			# corner of the cell the number belongs to
+			cr.move_to(n['x'] - extents.width - extents.x_bearing - 2,
+				n['y'] - 2)
+			cr.show_text(text)
+
+		for p in self.pieces:
+			if not p.visible or not p.pixbuf:
+				continue
+			Gdk.cairo_set_source_pixbuf(cr, p.pixbuf, p.x, p.y)
+			cr.paint()
+		return False
+
+	# --- coordinates / hit testing ---
+
+	def piece_at(self, x, y):
+		"return topmost piece at device coordinates <x>,<y>, or None"
+		gw = self._grid_width
+		for p in reversed(self.pieces):
+			if not p.visible:
+				continue
+			if p.x <= x < p.x + gw and p.y <= y < p.y + gw:
+				return p
+		return None
+
+	# --- event handling ---
+
+	def on_button_press(self, widget, event):
+		if self.busy and event.button != 3:
+			pass # still allow menu popup while busy
+		piece = None
+		if not self.edit:
+			piece = self.piece_at(event.x, event.y)
+		if event.button == 3 and not piece:
+			return self.on_board_event(event)
+		if piece:
+			return self.on_piece_event(piece, event)
+		return self.on_board_event(event)
+
+	def on_button_release(self, widget, event):
+		if self._drag_piece:
+			return self.on_piece_event(self._drag_piece, event)
+		return False
+
+	def on_motion_notify(self, widget, event):
+		if self._drag_piece:
+			return self.on_piece_event(self._drag_piece, event)
+		return False
+
+	def on_board_event(self, event):
 		"handle events on board, ie. menu and edit mode"
-		if event.type != gtk.gdk.BUTTON_PRESS: return False
+		if event.type != Gdk.EventType.BUTTON_PRESS: return False
 		if self.busy: return False
 
 		# context menu
 		if event.button == 3:
 			menu = Main.gui['Menu']
-			menu.popup(None,None,None,event.button,event.time)
+			menu.popup(None, None, None, None, event.button, event.time)
 			return True
 
 		if not self.edit: return False
-		
+
 		gw = self._grid_width
 		bw = self._board_width
 		cells = bw / gw
@@ -1978,7 +2175,7 @@ class CheckerBoard(gnome.canvas.Canvas):
 		cells = bw / gw
 
 		# drag
-		if event.type == gtk.gdk.BUTTON_PRESS:
+		if event.type == Gdk.EventType.BUTTON_PRESS:
 			if self.busy: return False
 			x = math.floor(event.x / gw)
 			y = math.floor(event.y / gw)
@@ -1994,21 +2191,18 @@ class CheckerBoard(gnome.canvas.Canvas):
 			# starting square
 			self._x1 = self._x = event.x
 			self._y1 = self._y = event.y
-			"""
-			################
-			# TODO item.grab
-			################
-			"""
 			piece.raise_to_top()
 			self._temp_move = [num]
 			self.busy = True
+			self._drag_piece = piece
 			return True
 		# piece dropped
 		if self._x1 == 0:
 			self.busy = False
+			self._drag_piece = None
 			return True
 		# drop
-		if event.type == gtk.gdk.BUTTON_RELEASE:
+		if event.type == Gdk.EventType.BUTTON_RELEASE:
 			x = math.floor(event.x / gw)
 			y = math.floor(event.y / gw)
 			if self._flipped:
@@ -2026,18 +2220,19 @@ class CheckerBoard(gnome.canvas.Canvas):
 				self._x1 = self._y1 = 0
 				self._temp_move = []
 				self.busy = False
+				self._drag_piece = None
 				return True
 			# legal, snap piece to grid
 			x *= gw
 			y *= gw
-			x, y = piece.w2i(x, y)
 			piece.set(x=x, y=y)
 			self._x1 = self._y1 = 0
+			self._drag_piece = None
 			Main.game.do_usermove(self._temp_move, legal)
 			self.busy = False
 			return True
 		# ignore other events
-		if event.type != gtk.gdk.MOTION_NOTIFY:
+		if event.type != Gdk.EventType.MOTION_NOTIFY:
 			return True
 		# off board, return to start
 		if event.x < 0 or event.y < 0 or event.x > bw or event.y > bw:
@@ -2046,6 +2241,7 @@ class CheckerBoard(gnome.canvas.Canvas):
 			piece.move(u, v)
 			self._x1 = self._y1 = 0
 			self.busy = False
+			self._drag_piece = None
 			return False
 		u = event.x - self._x
 		v = event.y - self._y
@@ -2059,7 +2255,6 @@ class CheckerBoard(gnome.canvas.Canvas):
 		piece = Main.game.num2piece(num)
 		assert piece
 		piece.hide()
-		self.update_now()
 
 	def set_piece(self, num, value):
 		"make piece on square <num> of <value>, return new piece"
@@ -2067,29 +2262,29 @@ class CheckerBoard(gnome.canvas.Canvas):
 		if not self.edit:
 			assert piece
 		if not value:
-			piece.destroy()
+			if piece:
+				piece.destroy()
 			return 0
 		elif not piece:
-			piece = self.pieces.add(gnome.canvas.CanvasPixbuf)
 			x, y = Main.game.num2coor(num)
 			gw = self._grid_width
-			piece.set(pixbuf=self.pixbufs[value], x=x * gw, y=y * gw)
-			piece.connect('event', self.on_piece_event)
+			piece = Piece(self, self.pixbufs[value], x * gw, y * gw)
+			self.pieces.append(piece)
 		else:
 			piece.set(pixbuf=self.pixbufs[value])
 		return piece
 
-	def move_piece(self, a, b,):
+	def move_piece(self, a, b):
 		"animate move, set board to 'busy'"
 		def step(x, y):
 			"diagonal path"
 			u = v = 1
 			if x < 0: u = -1
 			if y < 0: v = -1
-			for i in xrange(max(abs(x),abs(y))):
+			for i in range(max(abs(x), abs(y))):
 				if i > abs(x): u = 0
 				if i > abs(y): v = 0
-				yield((u, v))
+				yield (u, v)
 		piece = Main.game.num2piece(a)
 		assert piece
 		self.busy = True
@@ -2103,17 +2298,19 @@ class CheckerBoard(gnome.canvas.Canvas):
 			x2, y2 = bw - x2, bw - y2
 		for u, v in step((x2 - x1) * gw, (y2 - y1) * gw):
 			piece.move(u, v)
-			self.update_now()
+			self.queue_draw()
+			while Gtk.events_pending():
+				Gtk.main_iteration()
 		self.busy = False
 
 	def move_piece2(self, a, b):
-		"animate move in gtk.idle, set board to 'busy'"
+		"animate move in gobject idle, set board to 'busy'"
 		def step(x, y):
 			"diagonal path"
 			u = v = 1
 			if x < 0: u = -1
 			if y < 0: v = -1
-			for i in xrange(max(abs(x),abs(y))):
+			for i in range(max(abs(x), abs(y))):
 				if i > abs(x): u = 0
 				if i > abs(y): v = 0
 				piece.move(u, v)
@@ -2124,7 +2321,8 @@ class CheckerBoard(gnome.canvas.Canvas):
 			if self.busy:
 				yield True
 			self.busy = True
-			gobject.idle_add(step(x, y).next)
+			gen = step(x, y)
+			GLib.idle_add(lambda gen=gen: next(gen, False))
 			yield False
 		piece = Main.game.num2piece(a)
 		assert piece
@@ -2132,8 +2330,8 @@ class CheckerBoard(gnome.canvas.Canvas):
 		gw = self._grid_width
 		x1, y1 = Main.game.num2coor(a)
 		x2, y2 = Main.game.num2coor(b)
-		gobject.idle_add(wait((x2 - x1) * gw, (y2 - y1) * gw).next)
-gobject.type_register(CheckerBoard) # make widget available to libglade
+		outer = wait((x2 - x1) * gw, (y2 - y1) * gw)
+		GLib.idle_add(lambda outer=outer: next(outer, False))
 
 
 # =============
@@ -2142,7 +2340,7 @@ gobject.type_register(CheckerBoard) # make widget available to libglade
 
 import glob
 
-class Players(gtk.ListStore):
+class Players(Gtk.ListStore):
 	"""list the possible opponents in a game
 
 	human is always first, then comes the list of available engines
@@ -2162,7 +2360,7 @@ class Players(gtk.ListStore):
 
 	def __init__(self):
 		"human is first, then load engines, ask them for gametype etc."
-		super(Players, self).__init__(str, str, int, str, str, str, Engine)
+		Gtk.ListStore.__init__(self, str, str, int, str, str, str, Engine)
 
 		# human player, aka user
 		name = Main.prefs.get('player', 'name')
@@ -2250,7 +2448,7 @@ class Players(gtk.ListStore):
 # G U I
 # =====
 
-class NewDialog(gtk.Dialog):
+class NewDialog(Gtk.Dialog):
 	"""Start new game with options
 
 	Options are: gametype, black and white players
@@ -2261,10 +2459,15 @@ class NewDialog(gtk.Dialog):
 	the humans "any" gametype
 	"""
 
+	__gtype_name__ = 'NewDialog'
+
 	_gametype = 0
 	_gametypes = [0]
 
-	def gt_exclude(self, model, iter):
+	def __init__(self):
+		Gtk.Dialog.__init__(self)
+
+	def gt_exclude(self, model, iter, data=None):
 		"exclude entries by global gametype"
 		gt = model.get_value(iter, Main.players.COL_GAMETYPE)
 		if gt == 0:
@@ -2273,7 +2476,7 @@ class NewDialog(gtk.Dialog):
 			return True
 		return False
 
-	def gt_unique(self, model, iter):
+	def gt_unique(self, model, iter, data=None):
 		"only one entry per gametype"
 		gt = model.get_value(iter, Main.players.COL_GAMETYPE)
 		if gt in self._gametypes:
@@ -2359,7 +2562,7 @@ class NewDialog(gtk.Dialog):
 
 		# gametypes
 		gbox = Main.gui['NewGametypeBox']
-		cell = gtk.CellRendererText()
+		cell = Gtk.CellRendererText()
 		gbox.pack_start(cell, True)
 		gbox.add_attribute(cell, 'text', Main.players.COL_GAMENAME)
 		gbox.set_model(self.ufil)
@@ -2367,22 +2570,27 @@ class NewDialog(gtk.Dialog):
 
 		# players
 		bbox = Main.gui['NewBlackBox']
-		cell = gtk.CellRendererText()
+		cell = Gtk.CellRendererText()
 		bbox.pack_start(cell, True)
 		bbox.add_attribute(cell, 'text', Main.players.COL_NAME)
 		bbox.set_model(self.xfil)
 
 		wbox = Main.gui['NewWhiteBox']
-		cell = gtk.CellRendererText()
+		cell = Gtk.CellRendererText()
 		wbox.pack_start(cell, True)
 		wbox.add_attribute(cell, 'text', Main.players.COL_NAME)
 		wbox.set_model(self.xfil)
 
 		self.reset()
-gobject.type_register(NewDialog) # make widget available to libglade
 
-class Feedback(gtk.Statusbar):
+
+class Feedback(Gtk.Statusbar):
 	"""the statusbar displays mostly what the engine thinks it does"""
+
+	__gtype_name__ = 'Feedback'
+
+	def __init__(self):
+		Gtk.Statusbar.__init__(self)
 
 	def prepare(self):
 		"setup statusbar contexts: engine, game"
@@ -2400,128 +2608,141 @@ class Feedback(gtk.Statusbar):
 		self.pop(self.g_con)
 		self.push(self.g_con, message)
 		return False
-gobject.type_register(Feedback) # make widget available to libglade
-		
+
 
 class GladeGui:
-	"""interface with the libglade runtime
+	"""interface with the GtkBuilder runtime
 
 	the layout of the application window is described in a file
-	that libglade loads at runtime. signal handlers are installed
-	in this class' dictionary. widgets are made available as
-	attributes of this class
+	(share/capers.ui) that Gtk.Builder loads at runtime. signal
+	handlers are installed from this class' dictionary. widgets are
+	made available as attributes of this class
 
 	display of pieces and numbers can be toggled
-	"""
 
-	types = dict(GnomeCanvas=CheckerBoard,
-		GtkTreeView=BookView,
-		GtkDialog=NewDialog,
-		GtkStatusbar=Feedback)
+	PORT NOTE: this used to load share/capers.glade with
+	gtk.glade.XML(gladefile, typedict={...}), mapping generic glade
+	widget classes (GnomeCanvas, GtkTreeView, GtkDialog,
+	GtkStatusbar) to this program's custom subclasses at load time.
+	Gtk.Builder has no such typedict mechanism: instead, the
+	converted share/capers.ui file directly declares
+	class="CheckerBoard"/"BookView"/"NewDialog"/"Feedback" for the
+	widgets that need one of those subclasses, and Gtk.Builder
+	resolves them by GType name - which is why every custom class
+	above sets __gtype_name__ to match. this module must be fully
+	imported (as it is) before Main.gui is constructed.
+	"""
 
 	def __getitem__(self, key):
 		"Make widgets available as attributes of this class"
-		return self.tree.get_widget(key)
+		return self.tree.get_object(key)
 
-	def __init__(self, gladefile):
+	def __init__(self, uifile):
 		"""Load the interface descripton and connect the signals
 		setup up actions and accelerators, create clipboard"""
-		self.tree = gtk.glade.XML(gladefile, typedict=self.types)
-		self.tree.signal_autoconnect(GladeGui.__dict__)
+		self.tree = Gtk.Builder()
+		self.tree.add_from_file(uifile)
+		self.tree.connect_signals(GladeGui.__dict__)
 		self.editempty = False
 
 		# clipboard
-		self.clipboard = gtk.clipboard_get(gtk.gdk.SELECTION_CLIPBOARD)
+		self.clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
 
 		# menu
 		menu = self['Menu']
-	
+
 		# action definitions
-		accelgroup = gtk.AccelGroup()
+		accelgroup = Gtk.AccelGroup()
 		self['Capers'].add_accel_group(accelgroup)
-		actiongroup = gtk.ActionGroup('Capers')
+		actiongroup = Gtk.ActionGroup(name='Capers')
 		self.actiongroup = actiongroup
 
-		action = gtk.Action('flip', 'F_lip board', 'Flip board', None)
+		action = Gtk.Action(name='flip', label='F_lip board',
+			tooltip='Flip board', stock_id=None)
 		action.connect('activate', self.flip_cb)
 		actiongroup.add_action_with_accel(action, '<control>l')
 		action.set_accel_group(accelgroup)
 		action.connect_accelerator()
 		menu.append(action.create_menu_item())
 
-		action = gtk.ToggleAction('edit', '_Edit board', 'Edit board', None)
+		action = Gtk.ToggleAction(name='edit', label='_Edit board',
+			tooltip='Edit board', stock_id=None)
 		action.connect('activate', self.edit_cb)
 		actiongroup.add_action_with_accel(action, '<control>e')
 		action.set_accel_group(accelgroup)
 		action.connect_accelerator()
 		menu.append(action.create_menu_item())
 
-		action = gtk.Action('editempty', '_Edit empty board', \
-			'Edit empty board', None)
+		action = Gtk.Action(name='editempty', label='_Edit empty board',
+			tooltip='Edit empty board', stock_id=None)
 		action.connect('activate', self.editempty_cb)
 		actiongroup.add_action_with_accel(action, '<control><shift>e')
 		action.set_accel_group(accelgroup)
 		action.connect_accelerator()
 		menu.append(action.create_menu_item())
-		
-		sep = gtk.SeparatorMenuItem()
+
+		sep = Gtk.SeparatorMenuItem()
 		sep.show()
 		menu.append(sep)
 
-		action = gtk.Action('copy', '_Copy game', \
-			'Copy game', gtk.STOCK_COPY)
+		action = Gtk.Action(name='copy', label='_Copy game',
+			tooltip='Copy game', stock_id=Gtk.STOCK_COPY)
 		action.connect('activate', self.copy_cb)
 		actiongroup.add_action_with_accel(action, None)
 		action.set_accel_group(accelgroup)
 		action.connect_accelerator()
 		menu.append(action.create_menu_item())
 
-		action = gtk.Action('paste', '_Paste game', \
-			'Paste game', gtk.STOCK_PASTE)
+		action = Gtk.Action(name='paste', label='_Paste game',
+			tooltip='Paste game', stock_id=Gtk.STOCK_PASTE)
 		action.connect('activate', self.paste_cb)
 		actiongroup.add_action_with_accel(action, None)
 		action.set_accel_group(accelgroup)
 		action.connect_accelerator()
 		menu.append(action.create_menu_item())
 
-		action = gtk.Action('open', '_Open book', 'Open book', gtk.STOCK_OPEN)
+		action = Gtk.Action(name='open', label='_Open book',
+			tooltip='Open book', stock_id=Gtk.STOCK_OPEN)
 		action.connect('activate', self.open_cb)
 		actiongroup.add_action_with_accel(action, None)
-		action.connect_proxy(self['Open book'])
+		self['Open book'].set_related_action(action)
 		action.set_accel_group(accelgroup)
 		action.connect_accelerator()
 		menu.append(action.create_menu_item())
 
-		action = gtk.Action('save', '_Save game', 'Save game', gtk.STOCK_SAVE)
+		action = Gtk.Action(name='save', label='_Save game',
+			tooltip='Save game', stock_id=Gtk.STOCK_SAVE)
 		action.connect('activate', self.save_cb)
 		actiongroup.add_action_with_accel(action, None)
-		action.connect_proxy(self['Save game'])
+		self['Save game'].set_related_action(action)
 		action.set_accel_group(accelgroup)
 		action.connect_accelerator()
 		menu.append(action.create_menu_item())
-		
-		sep = gtk.SeparatorMenuItem()
+
+		sep = Gtk.SeparatorMenuItem()
 		sep.show()
 		menu.append(sep)
 
-		action = gtk.Action('new', '_New game', 'New game', gtk.STOCK_NEW)
+		action = Gtk.Action(name='new', label='_New game',
+			tooltip='New game', stock_id=Gtk.STOCK_NEW)
 		action.connect('activate', self.new_cb)
 		actiongroup.add_action_with_accel(action, None)
-		action.connect_proxy(self['New game'])
+		self['New game'].set_related_action(action)
 		action.set_accel_group(accelgroup)
 		action.connect_accelerator()
 		menu.append(action.create_menu_item())
 
-		action = gtk.Action('nwo', '_New game with options',
-			'New game with options', gtk.STOCK_PROPERTIES)
+		action = Gtk.Action(name='nwo', label='_New game with options',
+			tooltip='New game with options', stock_id=Gtk.STOCK_PROPERTIES)
 		action.connect('activate', self.nwo_cb)
 		actiongroup.add_action_with_accel(action, '<control><shift>n')
-		action.connect_proxy(self['New game with options'])
+		self['New game with options'].set_related_action(action)
 		action.set_accel_group(accelgroup)
 		action.connect_accelerator()
 		menu.append(action.create_menu_item())
 
-		action = gtk.Action('quit', '_Quit', 'Quit program', gtk.STOCK_QUIT)
+		action = Gtk.Action(name='quit', label='_Quit',
+			tooltip='Quit program', stock_id=Gtk.STOCK_QUIT)
 		action.connect('activate', self.on_wm_quit)
 		actiongroup.add_action_with_accel(action, None)
 		action.set_accel_group(accelgroup)
@@ -2530,7 +2751,7 @@ class GladeGui:
 
 	# action callbacks
 	def quit_cb(self, *args):
-		gtk.main_quit()
+		Gtk.main_quit()
 
 	def new_cb(self, *args):
 		"new same game"
@@ -2546,7 +2767,7 @@ class GladeGui:
 		nwo = Main.gui['New...']
 		nwo.reset()
 		nwo.connect("close", lambda w: nwo.hide()) # esc key
-		if nwo.run() == gtk.RESPONSE_OK:
+		if nwo.run() == Gtk.ResponseType.OK:
 			nwo.save()
 			Main.game.new()
 		else:
@@ -2558,23 +2779,23 @@ class GladeGui:
 		if Main.game.lock.locked():
 			return
 		Main.feedback.g_push('Select book to open...')
-		fc = gtk.FileChooserDialog(title='Open...',
-			action=gtk.FILE_CHOOSER_ACTION_OPEN,
-			buttons=(gtk.STOCK_CANCEL, gtk.RESPONSE_CANCEL,
-			gtk.STOCK_OPEN, gtk.RESPONSE_OK))
-		fc.set_default_response(gtk.RESPONSE_OK)
-		filter = gtk.FileFilter()
+		fc = Gtk.FileChooserDialog(title='Open...',
+			action=Gtk.FileChooserAction.OPEN,
+			buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+			Gtk.STOCK_OPEN, Gtk.ResponseType.OK))
+		fc.set_default_response(Gtk.ResponseType.OK)
+		filter = Gtk.FileFilter()
 		filter.set_name("Checkers Books")
 		filter.add_pattern("*.pdn")
 		filter.add_mime_type("text/*")
 		fc.add_filter(filter)
-		filter = gtk.FileFilter()
+		filter = Gtk.FileFilter()
 		filter.set_name("All Files")
 		filter.add_pattern("*")
 		fc.add_filter(filter)
 		opendir = Main.prefs.get('paths', 'opengame')
 		fc.set_current_folder(opendir)
-		if fc.run() == gtk.RESPONSE_OK:
+		if fc.run() == Gtk.ResponseType.OK:
 			fn = fc.get_filename()
 			try:
 				f = open(fn, 'r')
@@ -2598,17 +2819,17 @@ class GladeGui:
 		if Main.game.lock.locked():
 			return
 		Main.feedback.g_push('Select file for saving...')
-		fc = gtk.FileChooserDialog(title='Save as...',
-			action=gtk.FILE_CHOOSER_ACTION_SAVE,
-			buttons=(gtk.STOCK_CANCEL, gtk.RESPONSE_CANCEL,
-			gtk.STOCK_SAVE, gtk.RESPONSE_OK))
-		fc.set_default_response(gtk.RESPONSE_OK)
-		filter = gtk.FileFilter()
+		fc = Gtk.FileChooserDialog(title='Save as...',
+			action=Gtk.FileChooserAction.SAVE,
+			buttons=(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+			Gtk.STOCK_SAVE, Gtk.ResponseType.OK))
+		fc.set_default_response(Gtk.ResponseType.OK)
+		filter = Gtk.FileFilter()
 		filter.set_name("Checkers Books")
 		filter.add_pattern("*.pdn")
 		filter.add_mime_type("text/*")
 		fc.add_filter(filter)
-		filter = gtk.FileFilter()
+		filter = Gtk.FileFilter()
 		filter.set_name("All Files")
 		filter.add_pattern("*")
 		fc.add_filter(filter)
@@ -2617,11 +2838,11 @@ class GladeGui:
 		fc.set_current_name(filename)
 		savedir = Main.prefs.get('paths', 'savegame')
 		fc.set_current_folder(savedir)
-		if fc.run() == gtk.RESPONSE_OK:
+		if fc.run() == Gtk.ResponseType.OK:
 			fn = fc.get_filename()
 			f = open(fn, 'w')
 			f.write(text)
-			f.close
+			f.close()
 			# save path
 			savedir = os.path.dirname(fn)
 			Main.prefs.set('paths', 'savegame', savedir)
@@ -2637,7 +2858,7 @@ class GladeGui:
 			return
 		Main.feedback.g_push('Copy current game to clipboard')
 		filename, text = Main.book.game2pdn()
-		self.clipboard.set_text(text)
+		self.clipboard.set_text(text, -1)
 		Main.feedback.g_push('Copied current game to clipboard')
 
 	def paste_cb(self, *args):
@@ -2680,9 +2901,9 @@ class GladeGui:
 		if Main.game.lock.locked():
 			return
 		Main.board.flip()
-	
+
 	# glade handlers
-	def on_wm_quit(widget, event):
+	def on_wm_quit(widget, event=None):
 		Main.gui.quit_cb()
 
 	def on_button_begin(widget):
@@ -2708,7 +2929,7 @@ class GladeGui:
 # P R E F S
 # =========
 
-import ConfigParser
+import configparser as ConfigParser
 
 class Prefs(ConfigParser.RawConfigParser):
 	"""read, manage and save settings
@@ -2716,7 +2937,7 @@ class Prefs(ConfigParser.RawConfigParser):
 	- the player has a name
 	- the game has a gametype, a black and a white player
 	  players may be "human" or the path to an engine
-	- the look has a scene and a glade file
+	- the look has a scene and a user interface file
 
 	this is just the last game played, no checking is done, if
 	engine and gametype match; prefs are synced from "New..."
@@ -2755,12 +2976,10 @@ class Prefs(ConfigParser.RawConfigParser):
 		assert self.prefsfile
 		file = open(self.prefsfile, 'w')
 		self.write(file)
-		file.close
+		file.close()
 
 	def __init__(self):
 		"load settings, make defaults"
-		# not a new style class
-		#super(Prefs, self).__init__()
 		ConfigParser.RawConfigParser.__init__(self)
 
 		self.prefsfile = self.find()
@@ -2848,11 +3067,11 @@ class Prefs(ConfigParser.RawConfigParser):
 			maxtime = self.getint('engines', 'maxtime')
 		except ConfigParser.NoSectionError:
 			self.add_section('engines')
-			self.set('engines', 'maxtime', 2)
+			self.set('engines', 'maxtime', str(2))
 		except ConfigParser.NoOptionError:
-			self.set('engines', 'maxtime', 2)
+			self.set('engines', 'maxtime', str(2))
 		if maxtime < 1:
-			self.set('engines', 'maxtime', 1)
+			self.set('engines', 'maxtime', str(1))
 
 		# game
 		gametype = False
@@ -2866,7 +3085,7 @@ class Prefs(ConfigParser.RawConfigParser):
 			Main.game.ENGLISH, Main.game.ITALIAN,
 			Main.game.RUSSIAN, Main.game.MAFIERZ):
 			gametype = Main.game.ENGLISH
-			self.set('game', 'type', gametype)
+			self.set('game', 'type', str(gametype))
 
 		black = False
 		try:
@@ -2897,11 +3116,11 @@ class Prefs(ConfigParser.RawConfigParser):
 			timeout = self.getint('game', 'timeout')
 		except ConfigParser.NoSectionError:
 			self.add_section('game')
-			self.set('game', 'timeout', 500)
+			self.set('game', 'timeout', str(500))
 		except ConfigParser.NoOptionError:
-			self.set('game', 'timeout', 500)
+			self.set('game', 'timeout', str(500))
 		if timeout < 100:
-			self.set('game', 'timeout', 100)
+			self.set('game', 'timeout', str(100))
 
 		# look
 		scenefile = False
@@ -2918,19 +3137,19 @@ class Prefs(ConfigParser.RawConfigParser):
 				+ scenefile)
 			self.set('look', 'scene', scenefile)
 
-		gladefile = False
+		uifile = False
 		try:
-			gladefile = self.get('look', 'glade')
+			uifile = self.get('look', 'glade')
 		except ConfigParser.NoSectionError:
 			self.add_section('look')
 		except ConfigParser.NoOptionError:
 			pass
-		if not gladefile or not os.path.isfile(gladefile):
-			gladefile = os.path.join(cwd, 'share', 'capers.glade')
-			if not os.access(gladefile, os.F_OK | os.R_OK):
+		if not uifile or not os.path.isfile(uifile):
+			uifile = os.path.join(cwd, 'share', 'capers.ui')
+			if not os.access(uifile, os.F_OK | os.R_OK):
 				Fatal('User interface description not found:\n\n'
-				+ gladefile)
-			self.set('look', 'glade', gladefile)
+				+ uifile)
+			self.set('look', 'glade', uifile)
 
 		self.save()
 
@@ -2939,12 +3158,15 @@ class Prefs(ConfigParser.RawConfigParser):
 # M A I N
 # =======
 
-class Fatal(gtk.Window):
+class Fatal(Gtk.Window):
 	"the program cannot continue, display dialog telling the reason"
 	def __init__(self, text):
-		gobject.GObject.__init__(self)
-		message = gtk.MessageDialog(None, gtk.DIALOG_MODAL,
-			gtk.MESSAGE_ERROR, gtk.BUTTONS_CLOSE, text)
+		Gtk.Window.__init__(self)
+		message = Gtk.MessageDialog(parent=None,
+			flags=Gtk.DialogFlags.MODAL,
+			message_type=Gtk.MessageType.ERROR,
+			buttons=Gtk.ButtonsType.CLOSE,
+			text=text)
 		response = message.run()
 		message.destroy()
 		sys.exit(1)
@@ -2958,10 +3180,6 @@ class Main:
 	is this a singleton?
 	"""
 	def __init__(self):
-		try:
-			gobject.threads_init()
-		except:
-			Fatal('No threads in pygtk')
 		Main.pos = Position()
 		Main.game = Game()
 		Main.book = Book()
@@ -2985,4 +3203,8 @@ class Main:
 			del pdn
 		else:
 			Main.game.new()
-		gtk.main()
+		Gtk.main()
+
+
+if __name__ == '__main__':
+	Main()
