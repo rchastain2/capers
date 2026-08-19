@@ -45,13 +45,12 @@ bak: clean
 	(cd .. && tar cvfz capers-beta$(BETA).tar.gz capers)
 
 install: $(SUBDIRS)
-	python -m compileall share
+	python3 -m compileall share
 	install -d $(BIN_DIR)
 	install capers $(BIN_DIR)
 	install -d $(SHR_DIR)
 	install share/capers.py $(SHR_DIR)
-	install share/capers.pyc $(SHR_DIR)
-	install -m 644 share/capers.glade $(SHR_DIR)
+	install -m 644 share/capers.ui $(SHR_DIR)
 	install -m 644 share/capers.xpm $(SHR_DIR)
 	install -m 644 share/scene.xpm $(SHR_DIR)
 	install -m 644 share/small.xpm $(SHR_DIR)
