@@ -8,12 +8,34 @@ from the capers module.
 PORT NOTE: ported from the original PyGTK2 launcher. Requires
 Python 3 and PyGObject with the GTK 3 typelib (python3-gi /
 PyGObject + gir1.2-gtk-3.0 on most Linux distributions).
+
+Locating capers.py has to work in two different layouts:
+- run straight from the source tree (./capers): share/ is a *child*
+  of the directory holding this launcher
+- run after "make install" (installed as $(BIN_DIR)/capers, with
+  capers.py installed into $(SHR_DIR), see the top-level Makefile):
+  share/ is a *sibling* of the bin/ directory holding this launcher,
+  both under DESTDIR - not a child of it
+Both candidates are tried, picking whichever one actually contains
+capers.py.
 """
 
 import sys
 import os
 appdir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(1, os.path.join(appdir, 'share'))
+prefix = os.path.dirname(appdir)
+candidates = [
+	os.path.join(appdir, 'share'), # uninstalled, run from the source tree
+	os.path.join(prefix, 'share'), # installed: bin/ and share/ are siblings
+]
+for sharedir in candidates:
+	if os.path.isfile(os.path.join(sharedir, 'capers.py')):
+		sys.path.insert(1, sharedir)
+		break
+else:
+	# none matched: fall back to the source-tree candidate so the
+	# ImportError below at least points at a sensible path
+	sys.path.insert(1, candidates[0])
 import capers
 
 import signal
