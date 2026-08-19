@@ -54,7 +54,6 @@ install: all
 clean:
 	rm -f *.o *.out *~ tags *.pdn *-stamp
 	rm -rf tmp
-	which dh_clean && dh_clean
 dist: clean
 	(cd .. && cp -a cliche cliche-$(VERSION) \
 	&& tar cvfz cliche-$(VERSION).tar.gz cliche-$(VERSION) \
