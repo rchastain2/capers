@@ -27,7 +27,7 @@ DEFS = -DDBINI=\"$(DB___DIR)/db.ini\" -DXBOOK=\"$(DB___DIR)/xbook.bin\" \
 #XDEFS = -DBIGEND
 
 #CFLAGS = -g -Wall $(DEFS) $(XDEFS)
-CFLAGS = -O3 $(DEFS) $(XDEFS)
+CFLAGS = -O3 -std=gnu17 -fcommon $(DEFS) $(XDEFS)
 
 LIB_CFLAGS=-fPIC
 LIB_LDFLAGS=-shared -Wl,-soname,$@
