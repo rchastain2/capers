@@ -1653,11 +1653,8 @@ class Engine (GObject.GObject):
 	def __init__(self, enginefile):
 		"load a dll, set globals: name, gametype, about, help"
 		GObject.GObject.__init__(self)
-		try:
-			self.engine = cdll.LoadLibrary(enginefile)
-		except OSError:
-			Fatal('Invalid engine, please remove:\n\n'
-				+ enginefile)
+		self.engine = cdll.LoadLibrary(enginefile)
+		self.engine.enginecommand
 
 		self.name = self.about = self.help = ''
 		res = self.enginecommand('name')
@@ -2374,15 +2371,24 @@ class Players(Gtk.ListStore):
 			search = os.path.join(libdir, '*.so')
 		engines = glob.glob(search)
 
-		for fn in engines:
-			engine = Engine(fn)
+		for fn in sorted(engines):
+			try:
+				engine = Engine(fn)
+			except OSError as err:
+				trace('skip %s: %s' % (fn, err))
+				continue
+			except AttributeError:
+				trace('skip %s: not a checkers engine' % fn)
+				continue
 			try:
 				name, about, help = engine.name, \
 					engine.about, engine.help
 				gametype = int(engine.get('gametype'))
 			except:
+				trace('skip %s: no gametype' % fn)
 				del engine
 				continue
+			trace('engine %s: %s, gametype %d' % (fn, name, gametype))
 			if gametype == Main.game.INTERNL:
 				gamename = 'International'
 			elif gametype == Main.game.ENGLISH:
@@ -3158,10 +3164,14 @@ class Prefs(ConfigParser.RawConfigParser):
 # M A I N
 # =======
 
+def trace(text):
+	print('capers: ' + text, file=sys.stderr)
+
 class Fatal(Gtk.Window):
 	"the program cannot continue, display dialog telling the reason"
 	def __init__(self, text):
 		Gtk.Window.__init__(self)
+		print(text, file=sys.stderr)
 		message = Gtk.MessageDialog(parent=None,
 			flags=Gtk.DialogFlags.MODAL,
 			message_type=Gtk.MessageType.ERROR,

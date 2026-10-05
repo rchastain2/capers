@@ -34,7 +34,7 @@ build-stamp: configure-stamp
 	dh_testdir
 
 	# Add here commands to compile the capers package.
-	$(MAKE) subdirs DESTDIR=/opt/capers
+	$(MAKE) subdirs DESTDIR=/opt/capers APP_DIR=/opt/capers
 
 	touch build-stamp
 
@@ -55,7 +55,7 @@ install: build
 	dh_installdirs
 
 	# Add here commands to install the package into debian/capers.
-	$(MAKE) install DESTDIR=$(CURDIR)/debian/capers/opt/capers
+	$(MAKE) install DESTDIR=$(CURDIR)/debian/capers/opt/capers APP_DIR=$(CURDIR)/debian/capers/opt/capers
 
 
 # Build architecture-independent files here.

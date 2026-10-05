@@ -7,9 +7,10 @@ VERSION=1.0
 # install paths
 DESTDIR=/usr/local
 BIN_DIR=$(DESTDIR)/bin
-LIB_DIR=$(DESTDIR)/lib
-SHR_DIR=$(DESTDIR)/share
-GMZ_DIR=$(DESTDIR)/games
+APP_DIR=$(DESTDIR)/lib/capers
+LIB_DIR=$(APP_DIR)/lib
+SHR_DIR=$(APP_DIR)/share
+GMZ_DIR=$(APP_DIR)/games
 
 # installed files
 BIN=capers
@@ -25,7 +26,7 @@ subdirs: $(SUBDIRS)
 
 $(SUBDIRS):
 	@for d in $(SUBDIRS); do \
-		(cd $$d && $(MAKE) PREFIX=$(DESTDIR)) \
+		(cd $$d && $(MAKE) DB___DIR=$(LIB_DIR)) \
 	done
 
 clean:
@@ -46,8 +47,10 @@ bak: clean
 
 install: $(SUBDIRS)
 	python3 -m compileall share
+	install -d $(APP_DIR)
+	install capers $(APP_DIR)
 	install -d $(BIN_DIR)
-	install capers $(BIN_DIR)
+	ln -srf $(APP_DIR)/$(BIN) $(BIN_DIR)/$(BIN)
 	install -d $(SHR_DIR)
 	install share/capers.py $(SHR_DIR)
 	install -m 644 share/capers.ui $(SHR_DIR)
